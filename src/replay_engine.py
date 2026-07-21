@@ -1,23 +1,32 @@
 # replay_engine.py
 
-import os
 import json
-from decimal import Decimal
-from typing import Dict, Any, Optional, List
 import math
-
-CLEANED_DIR = "../cleaned"   # adjust if needed
+import random
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ReplayState:
-    def __init__(self, timestamp: str, best_bid: Optional[List[str]],
-                 best_ask: Optional[List[str]], midprice: Optional[str]):
+    """A single reconstructed order-book tick.
+
+    Accepts multi-level (L2) bids/asks when available (list of [price, qty]
+    string pairs, sorted best-first) and falls back to a single-level book
+    when only best_bid/best_ask are present (legacy L1 cleaned files).
+    """
+
+    def __init__(self, timestamp: str, bids: List[List[str]], asks: List[List[str]],
+                 midprice: Optional[str]):
         self.timestamp = timestamp
-        self.best_bid_price = Decimal(best_bid[0]) if best_bid else None
-        self.best_bid_qty = Decimal(best_bid[1]) if best_bid else None
-        self.best_ask_price = Decimal(best_ask[0]) if best_ask else None
-        self.best_ask_qty = Decimal(best_ask[1]) if best_ask else None
+        self.bids: List[Tuple[Decimal, Decimal]] = [(Decimal(p), Decimal(q)) for p, q in bids]
+        self.asks: List[Tuple[Decimal, Decimal]] = [(Decimal(p), Decimal(q)) for p, q in asks]
         self.midprice = Decimal(midprice) if midprice else None
+
+        self.best_bid_price = self.bids[0][0] if self.bids else None
+        self.best_bid_qty = self.bids[0][1] if self.bids else None
+        self.best_ask_price = self.asks[0][0] if self.asks else None
+        self.best_ask_qty = self.asks[0][1] if self.asks else None
 
     def to_features(self) -> Dict[str, Any]:
         spread = None
@@ -26,31 +35,105 @@ class ReplayState:
 
         return {
             "timestamp": self.timestamp,
-            "best_bid_price": float(self.best_bid_price) if self.best_bid_price else None,
-            "best_bid_qty": float(self.best_bid_qty) if self.best_bid_qty else None,
-            "best_ask_price": float(self.best_ask_price) if self.best_ask_price else None,
-            "best_ask_qty": float(self.best_ask_qty) if self.best_ask_qty else None,
-            "midprice": float(self.midprice) if self.midprice else None,
+            "best_bid_price": float(self.best_bid_price) if self.best_bid_price is not None else None,
+            "best_bid_qty": float(self.best_bid_qty) if self.best_bid_qty is not None else None,
+            "best_ask_price": float(self.best_ask_price) if self.best_ask_price is not None else None,
+            "best_ask_qty": float(self.best_ask_qty) if self.best_ask_qty is not None else None,
+            "midprice": float(self.midprice) if self.midprice is not None else None,
             "spread": float(spread) if spread is not None else None,
         }
 
 
 class SmartOrderRouterReplay:
-    def __init__(self, date_str: str, initial_cash: float = 10000.0, trade_size: float = 0.001):
-        self.date_str = date_str
-        self.file_path = os.path.join(CLEANED_DIR, f"{date_str}.jsonl")
-        if not os.path.exists(self.file_path):
-            raise FileNotFoundError(f"Cleaned file not found: {self.file_path}")
+    """Replays a reconstructed order book and simulates liquidating a position.
 
-        self.file = open(self.file_path, "r")
+    Reward design (all in basis points of arrival notional so PPO sees O(1-1000)
+    values instead of raw dollars):
+
+      * Per fill: implementation shortfall vs the arrival midprice.
+        Selling below arrival = a cost (negative reward); selling above = a gain.
+      * A small per-step schedule penalty (a *rate*, so its sum over the episode
+        stays bounded) nudges the agent to keep pace with a TWAP line.
+      * A terminal leftover penalty models a punitive forced liquidation of any
+        inventory left when the execution window closes.
+
+    Market reaction to the agent's own sells is modelled two ways:
+
+      * Temporary impact: each fill walks the real reconstructed bid ladder
+        (cleaned_l2), so cost is a genuine volume-weighted average price
+        against displayed depth rather than a parametric formula -- smaller
+        child orders are cheaper because they don't need to walk as deep.
+      * Permanent impact: each sell shifts every level of the ladder down by a
+        decaying amount (book resilience) -> spreading a big sell over time is
+        cheaper than dumping it in one shot.
+
+    Falls back to the legacy single-level (L1) cleaned/{date}.jsonl format if
+    no cleaned_l2/{date}.jsonl file exists, in which case the "book" is just
+    the best bid/ask and walking it degenerates to a single-level fill.
+    """
+
+    def __init__(
+        self,
+        date_str: str,
+        total_target_qty: float = 25.0,
+        min_trade_size: float = 0.001,
+        horizon_steps: int = 300,
+        randomize_start: bool = True,
+        perm_impact_coefficient: float = 0.02,
+        perm_impact_decay: float = 0.97,
+        schedule_penalty_factor: float = 0.1,
+        leftover_penalty_factor: float = 0.5,
+    ):
+        self.date_str = date_str
+        project_root = Path(__file__).resolve().parent.parent
+        l2_path = project_root / "cleaned_l2" / f"{date_str}.jsonl"
+        l1_path = project_root / "cleaned" / f"{date_str}.jsonl"
+        if l2_path.exists():
+            self.file_path = l2_path
+            self.is_l2 = True
+        elif l1_path.exists():
+            self.file_path = l1_path
+            self.is_l2 = False
+        else:
+            raise FileNotFoundError(
+                f"No cleaned data found for {date_str} (looked in {l2_path} and {l1_path})"
+            )
+
+        # Files are a few MB at most, so load once and index in memory. This
+        # lets us pick a random start window per episode without reparsing.
+        with self.file_path.open("r", encoding="utf-8") as fh:
+            self.lines: List[str] = [ln for ln in fh if ln.strip()]
+
+        self.num_steps = len(self.lines)
+        if self.num_steps == 0:
+            raise ValueError(f"Cleaned file is empty: {self.file_path}")
+
         self.current_state: Optional[ReplayState] = None
 
-        self.initial_cash = Decimal(str(initial_cash))
-        self.cash = Decimal(str(initial_cash))
-        self.inventory = Decimal("0")
-        self.trade_size = Decimal(str(trade_size))
+        self.total_target_qty = Decimal(str(total_target_qty))
+        self.min_trade_size = Decimal(str(min_trade_size))
+        # Fractions of the total target sold per fire. Small enough that
+        # liquidating the position takes many child orders (pacing matters).
+        self.action_fractions = [0.0, 0.005, 0.01, 0.02, 0.05, 0.1]
 
-        self.last_portfolio_value = self.portfolio_value()
+        # Execution window (in ticks). The whole liquidation happens inside this
+        # short burst, not over the entire day.
+        self.horizon_steps = int(horizon_steps)
+        self.randomize_start = bool(randomize_start)
+
+        self.perm_impact_coefficient = float(perm_impact_coefficient)
+        self.perm_impact_decay = float(perm_impact_decay)
+        self.schedule_penalty_factor = float(schedule_penalty_factor)
+        self.leftover_penalty_factor = float(leftover_penalty_factor)
+
+        # An episode runs for at most horizon_steps ticks, and never past EOF.
+        self.max_steps = max(min(self.horizon_steps, self.num_steps), 1)
+
+        self._rng = random.Random()
+
+        self.cash = Decimal("0")
+        self.inventory = Decimal(str(total_target_qty))
+        self.remaining_inventory = Decimal(str(total_target_qty))
 
         self.midprice_history: List[float] = []
         self.return_history: List[float] = []
@@ -59,14 +142,29 @@ class SmartOrderRouterReplay:
         self.prev_ask_price: Optional[Decimal] = None
         self.prev_bid_qty: Optional[Decimal] = None
         self.prev_ask_qty: Optional[Decimal] = None
-
         self.prev_midprice: Optional[Decimal] = None
 
-        # Phase 2: execution metrics
+        self.start_index = 0
         self.step_index = 0
-        self.max_steps = 10000  # rough horizon for time-normalization
         self.cum_traded_qty = Decimal("0")
-        self.total_target_qty = Decimal("1.0")  # pretend we want to execute 1 BTC over the day
+
+        # Arrival benchmark and the agent's own accumulated (decaying) impact.
+        self.arrival_mid: Optional[float] = None
+        self.perm_impact = Decimal("0")
+
+    def seed(self, seed: Optional[int] = None):
+        self._rng.seed(seed)
+
+    @staticmethod
+    def _parse_record(data: Dict[str, Any]):
+        if "bids" in data and "asks" in data:
+            return data["timestamp"], data["bids"], data["asks"], data.get("midprice")
+        # Legacy L1 fallback: treat best_bid/best_ask as a single-level book.
+        best_bid = data.get("best_bid")
+        best_ask = data.get("best_ask")
+        bids = [best_bid] if best_bid else []
+        asks = [best_ask] if best_ask else []
+        return data["timestamp"], bids, asks, data.get("midprice")
 
     def portfolio_value(self) -> Decimal:
         if self.current_state and self.current_state.midprice is not None:
@@ -116,7 +214,7 @@ class SmartOrderRouterReplay:
 
         return float(vol_5), float(vol_10)
 
-    def _compute_ofi(self) -> (float, float, float):
+    def _compute_ofi(self):
         if self.current_state is None:
             return 0.0, 0.0, 0.0
 
@@ -159,8 +257,7 @@ class SmartOrderRouterReplay:
         total = float(bid_q + ask_q)
         if total == 0.0:
             return 0.0
-        di = (float(bid_q) - float(ask_q)) / total
-        return float(di)
+        return (float(bid_q) - float(ask_q)) / total
 
     def _compute_microprice_and_queue(self):
         if self.current_state is None:
@@ -178,22 +275,15 @@ class SmartOrderRouterReplay:
         total_q = float(bid_q + ask_q)
         if total_q == 0.0:
             micro = float(mid) if mid is not None else 0.0
-            qi = 0.0
-            total_depth = 0.0
-            spread_ratio = 0.0
-            return micro, qi, total_depth, spread_ratio
+            return micro, 0.0, 0.0, 0.0
 
         micro = (float(bid_p) * float(ask_q) + float(ask_p) * float(bid_q)) / total_q
         qi = float(bid_q) / total_q
-        total_depth = total_q
-
+        spread_ratio = 0.0
         if mid is not None and mid != 0:
-            spread = float(ask_p - bid_p)
-            spread_ratio = spread / float(mid)
-        else:
-            spread_ratio = 0.0
+            spread_ratio = float(ask_p - bid_p) / float(mid)
 
-        return float(micro), float(qi), float(total_depth), float(spread_ratio)
+        return float(micro), float(qi), total_q, float(spread_ratio)
 
     def _compute_market_impact(self, mid: Optional[Decimal]) -> float:
         if mid is None or self.prev_midprice is None:
@@ -203,30 +293,92 @@ class SmartOrderRouterReplay:
         self.prev_midprice = mid
         return impact
 
-    def _compute_twap_vwap(self) -> (float, float, float):
-        # time fraction in [0,1]
+    def _compute_twap_vwap(self):
         time_frac = min(self.step_index / self.max_steps, 1.0)
-
-        # TWAP target: linear schedule of total_target_qty
         twap_target = float(self.total_target_qty) * time_frac
-
-        # TWAP deviation: how much we've executed vs target
         twap_diff = float(self.cum_traded_qty - self.total_target_qty * Decimal(str(time_frac)))
-
-        # VWAP baseline: simple average of midprices so far
-        if len(self.midprice_history) > 0:
-            vwap_price = sum(self.midprice_history) / len(self.midprice_history)
-        else:
-            vwap_price = 0.0
-
+        vwap_price = sum(self.midprice_history) / len(self.midprice_history) if self.midprice_history else 0.0
         return float(time_frac), float(twap_target), float(twap_diff), float(vwap_price)
 
+    def _compute_book_depth(self):
+        """Multi-level depth/imbalance over the top 5 levels each side."""
+        if self.current_state is None:
+            return 0.0, 0.0, 0.0
+        bid_depth = float(sum(q for _, q in self.current_state.bids[:5]))
+        ask_depth = float(sum(q for _, q in self.current_state.asks[:5]))
+        total = bid_depth + ask_depth
+        imbalance = (bid_depth - ask_depth) / total if total > 0.0 else 0.0
+        return bid_depth, ask_depth, imbalance
+
+    def _walk_book_sell(
+        self, levels: List[Tuple[Decimal, Decimal]], qty: Decimal, perm_impact: Decimal
+    ) -> Tuple[Optional[Decimal], Decimal, bool]:
+        """Volume-weighted average fill price for selling `qty` against bid
+        `levels` (sorted best-first), each shifted down by `perm_impact`.
+
+        Returns (avg_price, filled_qty, exhausted_depth). If the order is
+        larger than the visible depth, the remainder fills at the worst
+        visible level with an extra cushion (real depth beyond what we
+        captured would be thinner still).
+        """
+        remaining = qty
+        total_cost = Decimal("0")
+        filled = Decimal("0")
+        last_eff_price: Optional[Decimal] = None
+
+        for price, level_qty in levels:
+            eff_price = price - perm_impact
+            if eff_price < 0:
+                eff_price = Decimal("0")
+            last_eff_price = eff_price
+
+            take = min(remaining, level_qty)
+            if take <= 0:
+                continue
+            total_cost += take * eff_price
+            filled += take
+            remaining -= take
+            if remaining <= 0:
+                break
+
+        exhausted = remaining > 0
+        if exhausted and last_eff_price is not None:
+            extra_price = max(Decimal("0"), last_eff_price * Decimal("0.995"))
+            total_cost += remaining * extra_price
+            filled += remaining
+            remaining = Decimal("0")
+
+        if filled <= 0:
+            return None, Decimal("0"), exhausted
+
+        return total_cost / filled, filled, exhausted
+
+    def _estimate_impact_bps(self, fraction: float) -> float:
+        """Hypothetical cost (bps vs top-of-book) of executing `fraction` of
+        the target right now, without actually trading. Lets the agent see
+        how expensive firing would be before deciding to fire."""
+        if self.current_state is None or not self.current_state.bids:
+            return 0.0
+        qty = max(self.min_trade_size, self.total_target_qty * Decimal(str(fraction)))
+        avg_price, filled_qty, _ = self._walk_book_sell(self.current_state.bids, qty, self.perm_impact)
+        best_bid = self.current_state.best_bid_price
+        if avg_price is None or filled_qty <= 0 or not best_bid:
+            return 0.0
+        cost = (best_bid - avg_price) / best_bid
+        return float(cost) * 1e4
+
+    def _arrival_notional(self) -> float:
+        """Notional used to express reward in basis points."""
+        ref = self.arrival_mid
+        if ref is None and self.current_state and self.current_state.midprice is not None:
+            ref = float(self.current_state.midprice)
+        return max(float(self.total_target_qty) * (ref or 0.0), 1e-9)
+
     def reset(self):
-        self.file.seek(0)
         self.current_state = None
-        self.cash = self.initial_cash
-        self.inventory = Decimal("0")
-        self.last_portfolio_value = self.portfolio_value()
+        self.cash = Decimal("0")
+        self.inventory = Decimal(str(self.total_target_qty))
+        self.remaining_inventory = Decimal(str(self.total_target_qty))
         self.midprice_history = []
         self.return_history = []
 
@@ -238,69 +390,140 @@ class SmartOrderRouterReplay:
 
         self.step_index = 0
         self.cum_traded_qty = Decimal("0")
+        self.arrival_mid = None
+        self.perm_impact = Decimal("0")
 
-        obs, _, done, _ = self.step(action=None)
+        # Pick the execution window's starting tick.
+        max_start = max(self.num_steps - self.max_steps, 0)
+        if self.randomize_start and max_start > 0:
+            self.start_index = self._rng.randint(0, max_start)
+        else:
+            self.start_index = 0
+
+        obs, _, _, _ = self.step(action=None)
         return obs
 
-    def _execute_action(self, action: Optional[str]):
-        info = {"filled": False, "fill_price": None, "slippage": 0.0}
+    def _execute_action(self, action: Optional[int]) -> Dict[str, Any]:
+        info = {
+            "filled": False,
+            "fill_price": None,
+            "slippage": 0.0,
+            "trade_qty": 0.0,
+            "impact_cost": 0.0,
+            "exhausted_depth": False,
+        }
 
         if action is None or self.current_state is None:
             return info
 
-        if action == "hold":
+        try:
+            action = int(action)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid action {action} for sell execution")
+
+        if action < 0 or action >= len(self.action_fractions):
+            raise ValueError(f"Invalid action {action} for sell execution")
+
+        fraction = self.action_fractions[action]
+        if fraction == 0.0 or self.inventory <= 0:
             return info
 
+        if not self.current_state.bids:
+            return info
+
+        target_qty = self.total_target_qty * Decimal(str(fraction))
+        trade_qty = min(self.inventory, max(self.min_trade_size, target_qty))
+        if trade_qty <= 0:
+            return info
+
+        avg_price, filled_qty, exhausted = self._walk_book_sell(
+            self.current_state.bids, trade_qty, self.perm_impact
+        )
+        if avg_price is None or filled_qty <= 0:
+            return info
+
+        best_bid_price = self.current_state.best_bid_price
+        proceeds = avg_price * filled_qty
+
+        self.cash += proceeds
+        self.inventory -= filled_qty
+        self.remaining_inventory = self.inventory
+        self.cum_traded_qty += filled_qty
+
+        # This sell adds to permanent impact, which decays each step (see step()).
+        added_impact = self.perm_impact_coefficient * float(best_bid_price) * (
+            float(filled_qty) / float(self.total_target_qty)
+        )
+        self.perm_impact += Decimal(str(added_impact))
+
         mid = float(self.current_state.midprice) if self.current_state.midprice is not None else None
+        fill_price_f = float(avg_price)
+        slippage = mid - fill_price_f if mid is not None else 0.0
+        impact_cost = float(best_bid_price) - fill_price_f
 
-        if action == "market_buy":
-            if self.current_state.best_ask_price is None:
-                return info
-            cost = self.trade_size * self.current_state.best_ask_price
-            if cost > self.cash:
-                return info
-            self.cash -= cost
-            self.inventory += self.trade_size
-            self.cum_traded_qty += self.trade_size
-            fill_price = float(self.current_state.best_ask_price)
-            info["filled"] = True
-            info["fill_price"] = fill_price
-            if mid is not None:
-                info["slippage"] = fill_price - mid
-
-        elif action == "market_sell":
-            if self.current_state.best_bid_price is None:
-                return info
-            if self.inventory < self.trade_size:
-                return info
-            proceeds = self.trade_size * self.current_state.best_bid_price
-            self.cash += proceeds
-            self.inventory -= self.trade_size
-            self.cum_traded_qty += self.trade_size
-            fill_price = float(self.current_state.best_bid_price)
-            info["filled"] = True
-            info["fill_price"] = fill_price
-            if mid is not None:
-                info["slippage"] = mid - fill_price
-
+        info["filled"] = True
+        info["fill_price"] = fill_price_f
+        info["trade_qty"] = float(filled_qty)
+        info["impact_cost"] = impact_cost
+        info["slippage"] = slippage
+        info["exhausted_depth"] = exhausted
         return info
 
-    def step(self, action: Optional[str] = None):
-        line = self.file.readline()
-        if not line:
-            obs = self.current_state.to_features() if self.current_state else {}
-            return obs, 0.0, True, {"end_of_day": True}
+    def _terminal_obs(self) -> Dict[str, Any]:
+        obs = self.current_state.to_features() if self.current_state else {}
+        obs["cash"] = float(self.cash)
+        obs["inventory"] = float(self.inventory)
+        obs["portfolio_value"] = float(self.portfolio_value())
+        obs["return_1"] = 0.0
+        obs["return_5"] = 0.0
+        obs["return_10"] = 0.0
+        obs["vol_5"] = 0.0
+        obs["vol_10"] = 0.0
+        obs["ofi_price"] = 0.0
+        obs["ofi_qty"] = 0.0
+        obs["ofi_combined"] = 0.0
+        obs["depth_imbalance"] = 0.0
+        obs["microprice"] = 0.0
+        obs["queue_imbalance"] = 0.0
+        obs["total_depth"] = 0.0
+        obs["spread_ratio"] = 0.0
+        obs["time_fraction"] = 1.0
+        obs["twap_target"] = float(self.total_target_qty)
+        obs["twap_diff"] = float(self.cum_traded_qty - self.total_target_qty)
+        obs["vwap_price"] = self._compute_twap_vwap()[3]
+        obs["remaining_inventory"] = float(self.inventory)
+        obs["remaining_inventory_ratio"] = float(self.inventory / self.total_target_qty)
+        obs["remaining_time"] = 0.0
+        obs["execution_cost"] = 0.0
+        obs["market_impact"] = 0.0
+        obs["slippage"] = 0.0
+        obs["perm_impact"] = float(self.perm_impact)
+        obs["bid_depth_5"] = 0.0
+        obs["ask_depth_5"] = 0.0
+        obs["book_imbalance_5"] = 0.0
+        obs["impact_bps_small"] = 0.0
+        obs["impact_bps_large"] = 0.0
+        return obs
 
-        data = json.loads(line)
-        self.current_state = ReplayState(
-            timestamp=data["timestamp"],
-            best_bid=data["best_bid"],
-            best_ask=data["best_ask"],
-            midprice=data["midprice"]
-        )
+    def step(self, action: Optional[int] = None):
+        line_cursor = self.start_index + self.step_index
+        if line_cursor >= self.num_steps:
+            # Ran off the end of the data before the window closed.
+            obs = self._terminal_obs()
+            reward = self._leftover_penalty()
+            return obs, reward, True, {"end_of_data": True}
+
+        # Permanent impact recovers a little every tick (book resilience).
+        self.perm_impact *= Decimal(str(self.perm_impact_decay))
+
+        data = json.loads(self.lines[line_cursor])
+        timestamp, bids, asks, midprice = self._parse_record(data)
+        self.current_state = ReplayState(timestamp=timestamp, bids=bids, asks=asks, midprice=midprice)
+
+        if self.arrival_mid is None and self.current_state.midprice is not None:
+            self.arrival_mid = float(self.current_state.midprice)
 
         self.step_index += 1
-
         info = self._execute_action(action)
 
         obs = self.current_state.to_features()
@@ -337,53 +560,93 @@ class SmartOrderRouterReplay:
         obs["total_depth"] = total_depth
         obs["spread_ratio"] = spread_ratio
 
-        # Phase 2: execution metrics
+        bid_depth_5, ask_depth_5, book_imbalance_5 = self._compute_book_depth()
+        obs["bid_depth_5"] = bid_depth_5
+        obs["ask_depth_5"] = ask_depth_5
+        obs["book_imbalance_5"] = book_imbalance_5
+        obs["impact_bps_small"] = self._estimate_impact_bps(self.action_fractions[1])
+        obs["impact_bps_large"] = self._estimate_impact_bps(self.action_fractions[-1])
+
         impact = self._compute_market_impact(mid)
         obs["market_impact"] = impact
 
         slippage = info.get("slippage", 0.0)
         obs["slippage"] = slippage
-
-        # execution cost: absolute slippage + absolute impact
-        exec_cost = abs(slippage) + abs(impact)
-        obs["execution_cost"] = exec_cost
+        obs["execution_cost"] = abs(slippage) + abs(impact) + info.get("impact_cost", 0.0)
 
         time_frac, twap_target, twap_diff, vwap_price = self._compute_twap_vwap()
         obs["time_fraction"] = time_frac
         obs["twap_target"] = twap_target
         obs["twap_diff"] = twap_diff
         obs["vwap_price"] = vwap_price
+        obs["remaining_inventory"] = float(self.inventory)
+        obs["remaining_inventory_ratio"] = float(self.inventory / self.total_target_qty)
+        obs["remaining_time"] = max(0.0, 1.0 - time_frac)
+        obs["perm_impact"] = float(self.perm_impact)
 
-        current_value = self.portfolio_value()
-        # reward: portfolio change minus execution cost
-        reward = float(current_value - self.last_portfolio_value) - exec_cost
-        self.last_portfolio_value = current_value
+        reward = self._compute_reward(info, twap_target)
 
-        return obs, reward, False, info
+        done = self.inventory <= 0 or self.step_index >= self.max_steps
+        if done:
+            reward += self._leftover_penalty()
+
+        return obs, reward, done, info
+
+    def _compute_reward(self, info: Dict[str, Any], twap_target: float) -> float:
+        """Reward in basis points of arrival notional."""
+        notional = self._arrival_notional()
+
+        # Implementation shortfall of this fill vs the arrival midprice.
+        executed_reward = 0.0
+        if info.get("filled") and self.arrival_mid is not None:
+            shortfall = (self.arrival_mid - info["fill_price"]) * info["trade_qty"]
+            executed_reward = -(shortfall / notional) * 1e4  # bps
+
+        # Small pacing nudge. Divided by max_steps so the sum over the episode
+        # stays a bounded fraction of notional rather than exploding per-step.
+        behind = max(0.0, twap_target - float(self.cum_traded_qty))
+        schedule_penalty = (
+            self.schedule_penalty_factor
+            * (behind / float(self.total_target_qty))
+            * 1e4
+            / self.max_steps
+        )
+
+        return executed_reward - schedule_penalty
+
+    def _leftover_penalty(self) -> float:
+        """Punitive terminal cost for inventory not liquidated in time (bps)."""
+        if self.inventory <= 0:
+            return 0.0
+        leftover_ratio = float(self.inventory) / float(self.total_target_qty)
+        return -self.leftover_penalty_factor * leftover_ratio * 1e4
 
     def close(self):
-        self.file.close()
+        # Ticks are held in memory; nothing to close.
+        pass
 
 
 def main():
-        engine = SmartOrderRouterReplay("2026-07-11")
-        obs = engine.reset()
-        print("First obs:", obs)
+    engine = SmartOrderRouterReplay("2026-07-11", randomize_start=False)
+    obs = engine.reset()
+    print("First obs keys:", sorted(obs.keys()))
+    print("Using L2 depth:", engine.is_l2)
 
-        actions = ["hold", "market_buy", "hold", "market_sell"] * 3
+    actions = [0, 1, 0, 2, 0, 3, 0, 4, 0, 5]
+    for a in actions:
+        obs, reward, done, info = engine.step(a)
+        print(
+            f"Action: {a} | Reward(bps): {reward:.4f} | "
+            f"filled: {info.get('filled')} | qty: {info.get('trade_qty')} | "
+            f"slip: {obs['slippage']:.6e} | perm_impact: {obs['perm_impact']:.4f} | "
+            f"bid_depth_5: {obs['bid_depth_5']:.4f} | impact_small/large(bps): "
+            f"{obs['impact_bps_small']:.3f}/{obs['impact_bps_large']:.3f} | "
+            f"time: {obs['time_fraction']:.3f} | rem_inv: {obs['remaining_inventory']:.6f}"
+        )
+        if done:
+            break
 
-        for a in actions:
-            obs, reward, done, info = engine.step(a)
-            print(
-                f"Action: {a} | Reward: {reward:.6f} | "
-                f"slip: {obs['slippage']:.6e} | impact: {obs['market_impact']:.6e} | "
-                f"cost: {obs['execution_cost']:.6e} | time: {obs['time_fraction']:.3f} | "
-                f"twap_diff: {obs['twap_diff']:.6e}"
-            )
-            if done:
-                break
-
-        engine.close()
+    engine.close()
 
 
 if __name__ == "__main__":
