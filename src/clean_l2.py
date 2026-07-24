@@ -13,8 +13,9 @@
 
 import json
 import sys
-from decimal import Decimal
 from pathlib import Path
+
+from l2_book_state import apply_diff, top_of_book
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data"
 OUT_DIR = Path(__file__).resolve().parent.parent / "cleaned_l2"
@@ -53,37 +54,19 @@ def reconstruct_day(date_str: str, depth_levels: int = DEPTH_LEVELS, warmup: int
                     gaps += 1
                 prev_u = u if u is not None else prev_u
 
-                for price_str, qty_str in update.get("b", []):
-                    price = Decimal(price_str)
-                    qty = Decimal(qty_str)
-                    if qty == 0:
-                        bids.pop(price, None)
-                    else:
-                        bids[price] = qty
-
-                for price_str, qty_str in update.get("a", []):
-                    price = Decimal(price_str)
-                    qty = Decimal(qty_str)
-                    if qty == 0:
-                        asks.pop(price, None)
-                    else:
-                        asks[price] = qty
+                apply_diff(bids, asks, update)
 
                 n_events += 1
-                if n_events <= warmup or not bids or not asks:
+                if n_events <= warmup:
                     continue
 
-                best_bid_p = max(bids)
-                best_ask_p = min(asks)
-                if best_bid_p >= best_ask_p:
-                    # Transient crossed/locked book from partial reconstruction
-                    # noise (e.g. a level not yet touched on one side) -- skip
-                    # this tick rather than emit a nonsensical spread.
-                    n_crossed += 1
+                top_bids, top_asks, crossed = top_of_book(bids, asks, depth_levels)
+                if not top_bids or not top_asks:
+                    if crossed:
+                        n_crossed += 1
                     continue
 
-                top_bids = sorted(bids.items(), key=lambda kv: kv[0], reverse=True)[:depth_levels]
-                top_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth_levels]
+                best_bid_p, best_ask_p = top_bids[0][0], top_asks[0][0]
                 midprice = (best_bid_p + best_ask_p) / 2
 
                 record = {

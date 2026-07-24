@@ -5,6 +5,7 @@ from gymnasium import spaces
 import numpy as np
 
 from replay_engine import SmartOrderRouterReplay
+from feature_spec import FEATURE_NAMES
 
 
 class SORGymEnv(gym.Env):
@@ -17,46 +18,7 @@ class SORGymEnv(gym.Env):
 
         self.action_space = spaces.Discrete(len(self.engine.action_fractions))
 
-        self.feature_names = [
-            "best_bid_price",
-            "best_bid_qty",
-            "best_ask_price",
-            "best_ask_qty",
-            "midprice",
-            "spread",
-            "cash",
-            "inventory",
-            "portfolio_value",
-            "return_1",
-            "return_5",
-            "return_10",
-            "vol_5",
-            "vol_10",
-            "ofi_price",
-            "ofi_qty",
-            "ofi_combined",
-            "depth_imbalance",
-            "microprice",
-            "queue_imbalance",
-            "total_depth",
-            "spread_ratio",
-            "time_fraction",
-            "twap_target",
-            "twap_diff",
-            "vwap_price",
-            "remaining_inventory",
-            "remaining_inventory_ratio",
-            "remaining_time",
-            "execution_cost",
-            "market_impact",
-            "slippage",
-            "perm_impact",
-            "bid_depth_5",
-            "ask_depth_5",
-            "book_imbalance_5",
-            "impact_bps_small",
-            "impact_bps_large",
-        ]
+        self.feature_names = FEATURE_NAMES
 
         low = np.full(len(self.feature_names), -1e9, dtype=np.float32)
         high = np.full(len(self.feature_names), 1e9, dtype=np.float32)

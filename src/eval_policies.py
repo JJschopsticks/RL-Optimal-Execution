@@ -115,12 +115,14 @@ def _stats(values: List[float]) -> Dict:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", default="2026-07-11")
+    parser.add_argument("--date", nargs="+", default=["2026-07-21"],
+                        help="Date(s) to evaluate on; a random one is drawn per window if multiple.")
     parser.add_argument("--windows", type=int, default=30,
                         help="Number of random windows each policy is scored on.")
     parser.add_argument("--seed0", type=int, default=1000)
     args = parser.parse_args()
 
+    dates = args.date[0] if len(args.date) == 1 else args.date
     seeds = [args.seed0 + i for i in range(args.windows)]
 
     baselines = [
@@ -130,13 +132,13 @@ def main():
         ("No Trade", no_trade_policy),
     ]
 
-    print(f"Evaluating over {args.windows} matched random windows (date {args.date})\n")
+    print(f"Evaluating over {args.windows} matched random windows (date(s) {dates})\n")
 
     rows = []
     for name, policy_fn in baselines:
         # randomize_start=True so the seed selects a distinct window; every
         # policy is scored on the identical set of seeded windows.
-        env = SORGymEnv(args.date, randomize_start=True)
+        env = SORGymEnv(dates, randomize_start=True)
         rewards = [run_policy(env, policy_fn, seed=s)["total_reward"] for s in seeds]
         env.close()
         rows.append((name, _stats(rewards)))
@@ -144,7 +146,7 @@ def main():
     model_path = MODEL_DIR / "ppo_sor_final.zip"
     vecnorm_path = MODEL_DIR / "vecnormalize.pkl"
     if model_path.exists():
-        model, venv = load_trained(model_path, vecnorm_path, args.date)
+        model, venv = load_trained(model_path, vecnorm_path, dates)
         rewards = [run_trained(model, venv, s)["total_reward"] for s in seeds]
         rows.append(("Trained PPO", _stats(rewards)))
     else:

@@ -17,31 +17,39 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 VECNORM_PATH = MODEL_DIR / "vecnormalize.pkl"
 
 
-def make_env(date_str: str):
+def make_env(dates):
     def _init():
         # Monitor gives EvalCallback proper episode reward/length stats.
-        return Monitor(SORGymEnv(date_str=date_str))
+        return Monitor(SORGymEnv(date_str=dates))
 
     return _init
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", default="2026-07-11")
+    parser.add_argument(
+        "--train-dates", nargs="+", default=["2026-07-11", "2026-07-12", "2026-07-22"],
+        help="Dates to train on; a random one is drawn each episode.",
+    )
+    parser.add_argument(
+        "--held-out-date", default="2026-07-21",
+        help="Date never trained on, used to pick the 'best' checkpoint on true generalization.",
+    )
     parser.add_argument("--timesteps", type=int, default=20000)
     args = parser.parse_args()
 
     # Prices (~64k) and the bps rewards both need normalizing for PPO to learn.
     train_env = VecNormalize(
-        DummyVecEnv([make_env(args.date)]),
+        DummyVecEnv([make_env(args.train_dates)]),
         norm_obs=True,
         norm_reward=True,
         clip_obs=10.0,
     )
-    # Eval env normalizes obs with the training stats (synced by EvalCallback)
-    # but reports raw rewards so the numbers are interpretable.
+    # Held-out day, never seen in training, so "best model" is selected on
+    # genuine generalization instead of in-sample performance. Reports raw
+    # (non-normalized) rewards so the numbers stay interpretable in bps.
     eval_env = VecNormalize(
-        DummyVecEnv([make_env(args.date)]),
+        DummyVecEnv([make_env(args.held_out_date)]),
         norm_obs=True,
         norm_reward=False,
         clip_obs=10.0,

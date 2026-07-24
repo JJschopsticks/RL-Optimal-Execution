@@ -1,12 +1,16 @@
 import asyncio
 import json
-import os
 from datetime import datetime, UTC
+from pathlib import Path
 import websockets
 
 # Binance WebSocket endpoints
 DEPTH_STREAM = "wss://stream.binance.com:9443/ws/btcusdt@depth"
 TRADE_STREAM = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+
+# Data always lands in <project_root>/data, regardless of the CWD this script
+# is launched from.
+DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 
 # Buffers to store updates before writing
 depth_buffer = []
@@ -27,12 +31,12 @@ def get_date_folder():
 
 def ensure_daily_folders():
     """Ensure the folder structure for today's date exists."""
-    base = f"data/{get_date_folder()}"
-    depth_path = f"{base}/depth"
-    trade_path = f"{base}/trades"
+    base = DATA_ROOT / get_date_folder()
+    depth_path = base / "depth"
+    trade_path = base / "trades"
 
-    os.makedirs(depth_path, exist_ok=True)
-    os.makedirs(trade_path, exist_ok=True)
+    depth_path.mkdir(parents=True, exist_ok=True)
+    trade_path.mkdir(parents=True, exist_ok=True)
 
     return depth_path, trade_path
 
@@ -67,7 +71,7 @@ async def rotate_files():
 
         # Depth rotation
         if depth_buffer:
-            filename = f"{depth_path}/depth_{get_timestamp()}.json"
+            filename = depth_path / f"depth_{get_timestamp()}.json"
             with open(filename, "w") as f:
                 json.dump(depth_buffer, f, indent=4)
             print(f"Saved depth file → {filename}")
@@ -75,7 +79,7 @@ async def rotate_files():
 
         # Trade rotation
         if trade_buffer:
-            filename = f"{trade_path}/trades_{get_timestamp()}.json"
+            filename = trade_path / f"trades_{get_timestamp()}.json"
             with open(filename, "w") as f:
                 json.dump(trade_buffer, f, indent=4)
             print(f"Saved trades file → {filename}")
