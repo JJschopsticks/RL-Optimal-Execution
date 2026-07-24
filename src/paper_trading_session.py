@@ -109,8 +109,10 @@ class PaperTradingSession:
             self.start_time = datetime.now(UTC).isoformat()
             await self.order_book.connect()
             self.status = "warming_up"
+            self._publish_status()
             await self.order_book.wait_until_live()
             self.status = "running"
+            self._publish_status()
 
             self.envs = {
                 name: SORLiveEnv(self.order_book, total_target_qty=self.total_target_qty, horizon_steps=self.horizon_steps)
@@ -197,12 +199,18 @@ class PaperTradingSession:
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def to_summary(self) -> dict:
-        """Lightweight summary for the GET /api/sessions listing."""
+        """Lightweight summary for the GET /api/sessions listing. Includes
+        horizon_steps/total_target_qty so the history view can distinguish a
+        short dev/verification run from a genuine full-horizon session --
+        without it, a mismatched-horizon run's much worse numbers read as an
+        unexplained model regression rather than an apples-to-oranges episode."""
         return {
             "session_id": self.session_id,
             "status": self.status,
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "total_target_qty": self.total_target_qty,
+            "horizon_steps": self.horizon_steps,
             "policies": {
                 name: {"steps": self.step.get(name, 0), "total_reward": self.cum_reward.get(name, 0.0)}
                 for name in POLICY_NAMES

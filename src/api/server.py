@@ -38,8 +38,13 @@ _history: Dict[str, PaperTradingSession] = {}
 
 
 class StartSessionRequest(BaseModel):
+    # horizon_steps is intentionally not a caller-settable field: the model
+    # was trained on a 300-tick pacing schedule (time_fraction, twap_target,
+    # etc. all scale off it), so a different horizon isn't a fair comparison
+    # -- it's an out-of-distribution observation. PaperTradingSession's own
+    # default (300) is always used; see the "Lock live paper-trading sessions
+    # to the trained 300-tick horizon" plan for the incident that prompted this.
     total_target_qty: float = 25.0
-    horizon_steps: int = 300
 
 
 def _is_running(session: Optional[PaperTradingSession]) -> bool:
@@ -94,7 +99,7 @@ async def start_session(body: StartSessionRequest = StartSessionRequest()):
     if _is_running(_active):
         raise HTTPException(status_code=409, detail=f"Session {_active.session_id} is already {_active.status}")
 
-    session = PaperTradingSession(total_target_qty=body.total_target_qty, horizon_steps=body.horizon_steps)
+    session = PaperTradingSession(total_target_qty=body.total_target_qty)
     session.start()
     _active = session
     _history[session.session_id] = session
@@ -148,8 +153,14 @@ async def stream_session(websocket: WebSocket, session_id: str):
         for record in session.records.get(name, []):
             await websocket.send_json({"type": "tick", "policy": name, "data": record})
 
+    # Always send the current status immediately, whether active or not --
+    # a client connecting mid-warmup or mid-run would otherwise not learn the
+    # real status until the *next* transition (PaperTradingSession.run() only
+    # publishes on status changes, which may have already happened before
+    # this client subscribed).
+    await websocket.send_json({"type": "status", "status": session.status})
+
     if not _is_running(session):
-        await websocket.send_json({"type": "status", "status": session.status})
         await websocket.close()
         return
 
@@ -169,5 +180,11 @@ async def stream_session(websocket: WebSocket, session_id: str):
 @app.get("/api/health")
 async def health():
     if _active is None:
-        return {"status": "idle", "order_book_status": None}
-    return {"status": _active.status, "order_book_status": _active.order_book.status}
+        return {"status": "idle", "order_book_status": None, "warmup_progress": None}
+
+    ob = _active.order_book
+    warmup_progress = None
+    if ob.status in ("connecting", "warming_up"):
+        warmup_progress = {"n_events": ob.n_events, "warmup_events": ob.warmup_events}
+
+    return {"status": _active.status, "order_book_status": ob.status, "warmup_progress": warmup_progress}
