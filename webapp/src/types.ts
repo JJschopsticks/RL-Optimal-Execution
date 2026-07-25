@@ -86,10 +86,14 @@ export const POLICY_COLOR_VAR: Record<string, string> = {
   "No Trade": "--series-5",
 };
 
-// The model was trained assuming a 300-tick pacing schedule (time_fraction,
-// twap_target, etc. all scale off horizon_steps) -- a session run with a
-// different horizon isn't a fair comparison of model quality, it's a
-// different problem. The live Start form no longer lets this be overridden
-// (see src/api/server.py's StartSessionRequest); this constant remains only
-// for flagging any older/short-horizon sessions still in history.
-export const TRAINED_HORIZON = 300;
+// The current model was retrained with domain randomization across these
+// ranges (total_target_qty and horizon_steps both resampled per training
+// episode -- see src/train_rl.py), specifically to fix an earlier model that
+// only ever saw 25 BTC / 300 ticks and fell apart outside that single point
+// (confirmed live: -131 bps vs TWAP's -24 bps at 100 BTC). Validated via a
+// 30-window eval sweep across both axes before being deployed. The Start
+// form bounds its inputs to these ranges, and sessions from before this
+// retrain (fixed at exactly 300) are flagged in History as not comparable.
+export const TRAINED_QTY_RANGE: [number, number] = [5, 100];
+export const TRAINED_HORIZON_RANGE: [number, number] = [150, 450];
+export const TRAINED_HORIZON = 300; // the single point every pre-retrain session used

@@ -76,12 +76,12 @@ def run_policy(env: SORGymEnv, policy_fn: Callable[[Dict, SORGymEnv], int],
     }
 
 
-def load_trained(model_path: Path, vecnorm_path: Optional[Path], date_str: str):
+def load_trained(model_path: Path, vecnorm_path: Optional[Path], date_str: str, **engine_kwargs):
     """Load a PPO model wrapped in a reusable VecNormalize eval env."""
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-    venv = DummyVecEnv([lambda: SORGymEnv(date_str=date_str)])
+    venv = DummyVecEnv([lambda: SORGymEnv(date_str=date_str, **engine_kwargs)])
     if vecnorm_path and vecnorm_path.exists():
         venv = VecNormalize.load(str(vecnorm_path), venv)
         venv.training = False
@@ -120,10 +120,16 @@ def main():
     parser.add_argument("--windows", type=int, default=30,
                         help="Number of random windows each policy is scored on.")
     parser.add_argument("--seed0", type=int, default=1000)
+    parser.add_argument("--target-qty", type=float, default=25.0,
+                        help="total_target_qty for this eval run -- spot-check the trained model at "
+                             "different points (e.g. 10/25/50/75/100) to confirm it generalizes across scale.")
+    parser.add_argument("--horizon-steps", type=int, default=300,
+                        help="horizon_steps for this eval run -- spot-check across the trained range.")
     args = parser.parse_args()
 
     dates = args.date[0] if len(args.date) == 1 else args.date
     seeds = [args.seed0 + i for i in range(args.windows)]
+    engine_kwargs = {"total_target_qty": args.target_qty, "horizon_steps": args.horizon_steps}
 
     baselines = [
         ("Dump Everything", dump_policy),
@@ -132,13 +138,14 @@ def main():
         ("No Trade", no_trade_policy),
     ]
 
-    print(f"Evaluating over {args.windows} matched random windows (date(s) {dates})\n")
+    print(f"Evaluating over {args.windows} matched random windows (date(s) {dates}, "
+          f"target_qty={args.target_qty}, horizon_steps={args.horizon_steps})\n")
 
     rows = []
     for name, policy_fn in baselines:
         # randomize_start=True so the seed selects a distinct window; every
         # policy is scored on the identical set of seeded windows.
-        env = SORGymEnv(dates, randomize_start=True)
+        env = SORGymEnv(dates, randomize_start=True, **engine_kwargs)
         rewards = [run_policy(env, policy_fn, seed=s)["total_reward"] for s in seeds]
         env.close()
         rows.append((name, _stats(rewards)))
@@ -146,7 +153,7 @@ def main():
     model_path = MODEL_DIR / "ppo_sor_final.zip"
     vecnorm_path = MODEL_DIR / "vecnormalize.pkl"
     if model_path.exists():
-        model, venv = load_trained(model_path, vecnorm_path, dates)
+        model, venv = load_trained(model_path, vecnorm_path, dates, **engine_kwargs)
         rewards = [run_trained(model, venv, s)["total_reward"] for s in seeds]
         rows.append(("Trained PPO", _stats(rewards)))
     else:

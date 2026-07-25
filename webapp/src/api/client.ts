@@ -21,10 +21,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface StartSessionParams {
-  // horizon_steps is deliberately not a field here: the backend's
-  // StartSessionRequest no longer accepts it (see api/server.py) -- the
-  // trained 300-tick pacing schedule always applies.
   total_target_qty?: number;
+  horizon_steps?: number;
 }
 
 export function startSession(params: StartSessionParams = {}): Promise<{ session_id: string; status: string }> {

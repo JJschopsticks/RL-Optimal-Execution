@@ -41,14 +41,11 @@ export function LiveSessionView() {
       .catch(() => {});
   }, []);
 
-  const handleStart = useCallback(async (targetQty: number) => {
+  const handleStart = useCallback(async (targetQty: number, horizonSteps: number) => {
     setStarting(true);
     setErrorMsg(null);
     try {
-      // horizon_steps is intentionally not sent -- the backend always uses
-      // its trained default (300); see SessionControls for why it's not
-      // user-editable.
-      const res = await startSession({ total_target_qty: targetQty });
+      const res = await startSession({ total_target_qty: targetQty, horizon_steps: horizonSteps });
       setSessionId(res.session_id);
     } catch (e) {
       setErrorMsg(String((e as Error).message ?? e));

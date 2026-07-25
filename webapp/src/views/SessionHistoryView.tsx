@@ -2,12 +2,19 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listSessions } from "../api/client";
-import { TRAINED_HORIZON } from "../types";
+import { TRAINED_QTY_RANGE, TRAINED_HORIZON_RANGE } from "../types";
 import type { SessionSummary } from "../types";
+
+const [QTY_MIN, QTY_MAX] = TRAINED_QTY_RANGE;
+const [HORIZON_MIN, HORIZON_MAX] = TRAINED_HORIZON_RANGE;
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
   return iso.replace("T", " ").slice(0, 19) + " UTC";
+}
+
+function outOfRange(value: number | undefined, min: number, max: number): boolean {
+  return value === undefined || value < min || value > max;
 }
 
 export function SessionHistoryView() {
@@ -35,9 +42,10 @@ export function SessionHistoryView() {
         <span className="note">every paper-trading run, live or finished</span>
       </div>
       <p className="desc">
-        Rows with a horizon other than {TRAINED_HORIZON} ticks aren't comparable to the rest -- the model was
-        trained assuming a {TRAINED_HORIZON}-tick pacing schedule, so a shorter window gives it the wrong sense of
-        urgency rather than reflecting worse model quality.
+        The current model is validated for target sizes {QTY_MIN}-{QTY_MAX} BTC and horizons {HORIZON_MIN}-
+        {HORIZON_MAX} ticks (trained with both randomized episode-to-episode). Rows outside that range predate this
+        model or were run against it anyway -- they aren't comparable to the rest, since the observation the model
+        sees is out-of-distribution rather than a "harder" version of the same problem.
       </p>
 
       {error && <p className="footnote">Couldn't reach the backend: {error}</p>}
@@ -54,6 +62,7 @@ export function SessionHistoryView() {
                 <th>Session</th>
                 <th>Status</th>
                 <th>Started</th>
+                <th>Target</th>
                 <th>Horizon</th>
                 <th>Trained PPO</th>
                 <th>Baseline TWAP</th>
@@ -61,7 +70,8 @@ export function SessionHistoryView() {
             </thead>
             <tbody>
               {sessions.map((s) => {
-                const nonStandardHorizon = s.horizon_steps !== TRAINED_HORIZON;
+                const qtyFlagged = outOfRange(s.total_target_qty, QTY_MIN, QTY_MAX);
+                const horizonFlagged = outOfRange(s.horizon_steps, HORIZON_MIN, HORIZON_MAX);
                 return (
                   <tr key={s.session_id} className="clickable">
                     <td className="mono">
@@ -75,11 +85,19 @@ export function SessionHistoryView() {
                     <td className="mono">{fmtTime(s.start_time)}</td>
                     <td
                       className="mono"
-                      style={nonStandardHorizon ? { color: "var(--faint)" } : undefined}
-                      title={nonStandardHorizon ? `Not the trained horizon (${TRAINED_HORIZON} ticks) -- not comparable` : undefined}
+                      style={qtyFlagged ? { color: "var(--faint)" } : undefined}
+                      title={qtyFlagged ? `Outside the validated range (${QTY_MIN}-${QTY_MAX} BTC)` : undefined}
+                    >
+                      {s.total_target_qty ?? "—"}
+                      {qtyFlagged ? " *" : ""}
+                    </td>
+                    <td
+                      className="mono"
+                      style={horizonFlagged ? { color: "var(--faint)" } : undefined}
+                      title={horizonFlagged ? `Outside the validated range (${HORIZON_MIN}-${HORIZON_MAX} ticks)` : undefined}
                     >
                       {s.horizon_steps ?? "—"}
-                      {nonStandardHorizon ? " *" : ""}
+                      {horizonFlagged ? " *" : ""}
                     </td>
                     <td className="mono">
                       {s.policies["Trained PPO"] ? `${s.policies["Trained PPO"].total_reward.toFixed(2)} bps` : "—"}

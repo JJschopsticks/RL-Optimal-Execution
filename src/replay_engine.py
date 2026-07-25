@@ -1,8 +1,9 @@
 # replay_engine.py
 
 import json
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from execution_core import ExecutionCore, ReplayState
 
@@ -17,14 +18,27 @@ class SmartOrderRouterReplay(ExecutionCore):
     Falls back to the legacy single-level (L1) cleaned/{date}.jsonl format if
     no cleaned_l2/{date}.jsonl file exists, in which case the "book" is just
     the best bid/ask and walking it degenerates to a single-level fill.
+
+    total_target_qty_range / horizon_steps_range (both default None, i.e. no
+    randomization -- backward compatible with every existing eval/live call
+    site) let training draw a fresh target size and/or window length each
+    episode instead of always the fixed default. Without this, a model only
+    ever experiences one (qty, horizon) point and doesn't generalize to any
+    other -- confirmed the hard way: a model trained exclusively at 25 BTC /
+    300 ticks lost badly to a rule-based baseline the first time it was asked
+    to liquidate 100 BTC (real absolute trade size scales with
+    total_target_qty, but real order-book depth doesn't, so the same action
+    that was safe at 25 BTC walks much deeper into the same depth at 100).
     """
 
     def __init__(
         self,
         date_str,
         total_target_qty: float = 25.0,
+        total_target_qty_range: Optional[Tuple[float, float]] = None,
         min_trade_size: float = 0.001,
         horizon_steps: int = 300,
+        horizon_steps_range: Optional[Tuple[int, int]] = None,
         randomize_start: bool = True,
         perm_impact_coefficient: float = 0.02,
         perm_impact_decay: float = 0.97,
@@ -40,6 +54,8 @@ class SmartOrderRouterReplay(ExecutionCore):
             schedule_penalty_factor=schedule_penalty_factor,
             leftover_penalty_factor=leftover_penalty_factor,
         )
+        self.total_target_qty_range = total_target_qty_range
+        self.horizon_steps_range = horizon_steps_range
 
         # date_str may be a single "YYYY-MM-DD" or a list of them. Each
         # episode (see reset()) picks one date at random and a random start
@@ -99,6 +115,17 @@ class SmartOrderRouterReplay(ExecutionCore):
         return data["timestamp"], bids, asks, data.get("midprice")
 
     def reset(self):
+        # Resample target size / horizon *before* reset_episode_state(), so
+        # inventory is initialized against the freshly-sampled quantity in
+        # one pass rather than needing a second correction afterward.
+        if self.total_target_qty_range is not None:
+            lo, hi = self.total_target_qty_range
+            sampled_qty = self._rng.uniform(lo, hi)
+            self.total_target_qty = Decimal(str(round(sampled_qty, 3)))
+        if self.horizon_steps_range is not None:
+            lo_h, hi_h = self.horizon_steps_range
+            self.horizon_steps = self._rng.randint(lo_h, hi_h)
+
         self.reset_episode_state()
 
         # Pick the day (if multiple) and the execution window's starting tick.

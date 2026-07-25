@@ -17,7 +17,7 @@ from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from paper_trading_session import PaperTradingSession, SESSIONS_DIR, POLICY_NAMES
 
@@ -36,15 +36,19 @@ app.add_middleware(
 _active: Optional[PaperTradingSession] = None
 _history: Dict[str, PaperTradingSession] = {}
 
+# The current model was retrained with domain randomization across these
+# exact ranges (see src/train_rl.py) -- validated via a 30-window eval sweep
+# across both axes before deployment. Bounds are enforced here, not just in
+# the UI, so a value outside the validated distribution can't be requested
+# via any client (this is what fixed the earlier 100 BTC failure: the old
+# model was only ever trained/tested at one fixed point, 25 BTC / 300 ticks).
+QTY_MIN, QTY_MAX = 5.0, 100.0
+HORIZON_MIN, HORIZON_MAX = 150, 450
+
 
 class StartSessionRequest(BaseModel):
-    # horizon_steps is intentionally not a caller-settable field: the model
-    # was trained on a 300-tick pacing schedule (time_fraction, twap_target,
-    # etc. all scale off it), so a different horizon isn't a fair comparison
-    # -- it's an out-of-distribution observation. PaperTradingSession's own
-    # default (300) is always used; see the "Lock live paper-trading sessions
-    # to the trained 300-tick horizon" plan for the incident that prompted this.
-    total_target_qty: float = 25.0
+    total_target_qty: float = Field(default=25.0, ge=QTY_MIN, le=QTY_MAX)
+    horizon_steps: int = Field(default=300, ge=HORIZON_MIN, le=HORIZON_MAX)
 
 
 def _is_running(session: Optional[PaperTradingSession]) -> bool:
@@ -99,7 +103,7 @@ async def start_session(body: StartSessionRequest = StartSessionRequest()):
     if _is_running(_active):
         raise HTTPException(status_code=409, detail=f"Session {_active.session_id} is already {_active.status}")
 
-    session = PaperTradingSession(total_target_qty=body.total_target_qty)
+    session = PaperTradingSession(total_target_qty=body.total_target_qty, horizon_steps=body.horizon_steps)
     session.start()
     _active = session
     _history[session.session_id] = session

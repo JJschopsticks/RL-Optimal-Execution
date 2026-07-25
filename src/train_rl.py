@@ -17,10 +17,14 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 VECNORM_PATH = MODEL_DIR / "vecnormalize.pkl"
 
 
-def make_env(dates):
+def make_env(dates, target_qty_range=None, horizon_range=None):
     def _init():
         # Monitor gives EvalCallback proper episode reward/length stats.
-        return Monitor(SORGymEnv(date_str=dates))
+        return Monitor(SORGymEnv(
+            date_str=dates,
+            total_target_qty_range=target_qty_range,
+            horizon_steps_range=horizon_range,
+        ))
 
     return _init
 
@@ -35,21 +39,37 @@ def main():
         "--held-out-date", default="2026-07-21",
         help="Date never trained on, used to pick the 'best' checkpoint on true generalization.",
     )
-    parser.add_argument("--timesteps", type=int, default=20000)
+    parser.add_argument(
+        "--target-qty-range", type=float, nargs=2, default=[5.0, 100.0], metavar=("MIN", "MAX"),
+        help="total_target_qty is resampled uniformly from this range each episode. "
+             "Pass the same value twice (e.g. 25 25) to disable randomization.",
+    )
+    parser.add_argument(
+        "--horizon-range", type=int, nargs=2, default=[150, 450], metavar=("MIN", "MAX"),
+        help="horizon_steps is resampled uniformly from this range each episode. "
+             "Pass the same value twice (e.g. 300 300) to disable randomization.",
+    )
+    parser.add_argument("--timesteps", type=int, default=600000)
     args = parser.parse_args()
+
+    qty_range = None if args.target_qty_range[0] == args.target_qty_range[1] else tuple(args.target_qty_range)
+    horizon_range = None if args.horizon_range[0] == args.horizon_range[1] else tuple(args.horizon_range)
 
     # Prices (~64k) and the bps rewards both need normalizing for PPO to learn.
     train_env = VecNormalize(
-        DummyVecEnv([make_env(args.train_dates)]),
+        DummyVecEnv([make_env(args.train_dates, qty_range, horizon_range)]),
         norm_obs=True,
         norm_reward=True,
         clip_obs=10.0,
     )
     # Held-out day, never seen in training, so "best model" is selected on
-    # genuine generalization instead of in-sample performance. Reports raw
-    # (non-normalized) rewards so the numbers stay interpretable in bps.
+    # genuine generalization instead of in-sample performance. Uses the same
+    # randomized ranges as training -- otherwise "best" would be selected on
+    # a single fixed point, which is exactly the narrow-distribution problem
+    # this randomization exists to fix. Reports raw (non-normalized) rewards
+    # so the numbers stay interpretable in bps.
     eval_env = VecNormalize(
-        DummyVecEnv([make_env(args.held_out_date)]),
+        DummyVecEnv([make_env(args.held_out_date, qty_range, horizon_range)]),
         norm_obs=True,
         norm_reward=False,
         clip_obs=10.0,
@@ -77,6 +97,10 @@ def main():
         best_model_save_path=str(MODEL_DIR / "best"),
         log_path=str(MODEL_DIR / "logs"),
         eval_freq=5000,
+        # More episodes than SB3's default (5) to average out the extra
+        # variance a randomized (qty, horizon) distribution adds to the
+        # eval metric -- otherwise "best" checkpoint selection gets noisy.
+        n_eval_episodes=20,
         deterministic=True,
         render=False,
     )
