@@ -2,6 +2,10 @@
 A reinforcement-learning system that learns how to liquidate a large crypto position against a live, reconstructed limit order book while minimizing market impact and slippage trained with PPO, validated against real historical and live Binance data, and served through a live paper-trading dashboard.
 This project simulates the "optimal execution" problem that trading desks solve every day: if you need to sell a large amount of an asset, dumping it all at once crashes the price against you. A smarter agent breaks the order into pieces and paces them based on real-time order book signals. Here, that pacing policy is learned rather than hand-coded, and it's benchmarked head-to-head against classic execution baselines (TWAP, dump-all, no-trade) on the same data.
 
+Sample Live Session:
+<img width="2322" height="1076" alt="SORLiveSession" src="https://github.com/user-attachments/assets/567b0b36-4f15-4f58-abe6-8d16afad64c8" />
+<img width="2278" height="666" alt="SORLossGraph" src="https://github.com/user-attachments/assets/99925cc4-c7f3-4a2c-a073-a68474885664" />
+
 # Key features
 - Custom Gym environment (sor_env.py, sor_live_env.py) exposing a 37-dimensional feature vector per tick: order book state, order flow imbalance, microprice, depth imbalance, TWAP/VWAP tracking, realized volatility, and execution cost/impact metrics.
 - PPO training pipeline (train_rl.py) built on Stable-Baselines3, with VecNormalize observation/reward scaling, checkpointing, and evaluation callbacks against a genuinely unseen date.
