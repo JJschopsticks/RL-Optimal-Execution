@@ -1,4 +1,4 @@
-# RL-Optimal-Execution
+# RL Optimal Execution Agent
 A reinforcement-learning system that learns how to liquidate a large crypto position against a live, reconstructed limit order book while minimizing market impact and slippage trained with PPO, validated against real historical and live Binance data, and served through a live paper-trading dashboard.
 This project simulates the "optimal execution" problem that trading desks solve every day: if you need to sell a large amount of an asset, dumping it all at once crashes the price against you. A smarter agent breaks the order into pieces and paces them based on real-time order book signals. Here, that pacing policy is learned rather than hand-coded, and it's benchmarked head-to-head against classic execution baselines (TWAP, dump-all, no-trade) on the same data.
 
