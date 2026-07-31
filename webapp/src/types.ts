@@ -51,15 +51,10 @@ export interface SessionSummary {
   policies: Record<string, PolicySummary>;
 }
 
-export interface WarmupProgress {
-  n_events: number;
-  warmup_events: number;
-}
-
 export interface HealthResponse {
   status: SessionStatus | "idle";
+  // connecting | syncing | live | disconnected
   order_book_status: string | null;
-  warmup_progress: WarmupProgress | null;
 }
 
 // WebSocket message shapes (see api/server.py's stream_session)
@@ -86,14 +81,19 @@ export const POLICY_COLOR_VAR: Record<string, string> = {
   "No Trade": "--series-5",
 };
 
-// The current model was retrained with domain randomization across these
-// ranges (total_target_qty and horizon_steps both resampled per training
-// episode -- see src/train_rl.py), specifically to fix an earlier model that
-// only ever saw 25 BTC / 300 ticks and fell apart outside that single point
-// (confirmed live: -131 bps vs TWAP's -24 bps at 100 BTC). Validated via a
-// 30-window eval sweep across both axes before being deployed. The Start
-// form bounds its inputs to these ranges, and sessions from before this
-// retrain (fixed at exactly 300) are flagged in History as not comparable.
-export const TRAINED_QTY_RANGE: [number, number] = [5, 100];
-export const TRAINED_HORIZON_RANGE: [number, number] = [150, 450];
+// The current model was retrained with domain randomization across
+// qty=[25,250]/horizon=[150,450] (total_target_qty and horizon_steps both
+// resampled per training episode -- see src/train_rl.py), specifically to
+// fix an earlier model that only ever saw 25 BTC / 300 ticks and fell apart
+// outside that single point (confirmed live: -131 bps vs TWAP's -24 bps at
+// 100 BTC). But a post-training eval sweep found the model itself fails
+// catastrophically near the low end of the horizon range it was trained on
+// (16/60 episodes at 25 BTC/150 ticks left inventory unliquidated at the
+// deadline, vs 0/60 by horizon=200) -- so TRAINED_HORIZON_RANGE's floor here
+// is 200, narrower than the training range, to only expose what a follow-up
+// eval sweep actually confirmed safe. The Start form bounds its inputs to
+// these ranges, and sessions from before the qty/horizon retrain (fixed at
+// exactly 300) are flagged in History as not comparable.
+export const TRAINED_QTY_RANGE: [number, number] = [25, 250];
+export const TRAINED_HORIZON_RANGE: [number, number] = [200, 450];
 export const TRAINED_HORIZON = 300; // the single point every pre-retrain session used

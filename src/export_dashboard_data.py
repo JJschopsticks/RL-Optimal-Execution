@@ -67,7 +67,7 @@ def trace_trained(seed: int) -> Dict:
         DummyVecEnv([lambda: SORGymEnv(HELD_OUT_DATE, randomize_start=True)]),
     )
 
-    model = PPO.load(str(MODEL_DIR / "ppo_sor_final.zip"))
+    model = PPO.load(str(MODEL_DIR / "best" / "best_model.zip"))
 
     raw_env.engine.seed(seed)
     obs, _ = raw_env.reset()
@@ -96,7 +96,7 @@ def build_scoreboard() -> List[Dict]:
         env.close()
         rows.append({"name": name, **_stats(rewards)})
 
-    model_path = MODEL_DIR / "ppo_sor_final.zip"
+    model_path = MODEL_DIR / "best" / "best_model.zip"
     vecnorm_path = MODEL_DIR / "vecnormalize.pkl"
     model, venv = load_trained(model_path, vecnorm_path, HELD_OUT_DATE)
     rewards = [run_trained(model, venv, s)["total_reward"] for s in SCOREBOARD_SEEDS]

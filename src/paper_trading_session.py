@@ -45,6 +45,11 @@ POLICY_NAMES = [name for name, _ in BASELINES] + [PPO_NAME]
 class PaperTradingSession:
     """status: starting -> warming_up -> running -> completed | stopped | error
 
+    "warming_up" now covers the REST snapshot sync in LiveOrderBook.connect()
+    and lasts ~3s; it used to mean replaying ~100 diff events (~100s) to
+    bootstrap an empty book. The status name is kept so existing UI/history
+    rows stay meaningful.
+
     request_stop() only flips a flag checked between ticks -- the in-flight
     tick always finishes and is logged for every policy first, consistent
     with "simulated fills only, nothing torn down mid-fill."
@@ -54,7 +59,7 @@ class PaperTradingSession:
         self,
         total_target_qty: float = 25.0,
         horizon_steps: int = 300,
-        model_path: Path = MODEL_DIR / "ppo_sor_final.zip",
+        model_path: Path = MODEL_DIR / "best" / "best_model.zip",
         vecnorm_path: Path = MODEL_DIR / "vecnormalize.pkl",
     ):
         self.session_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]

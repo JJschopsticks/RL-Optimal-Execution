@@ -14,7 +14,7 @@ const [QTY_MIN, QTY_MAX] = TRAINED_QTY_RANGE;
 const [HORIZON_MIN, HORIZON_MAX] = TRAINED_HORIZON_RANGE;
 
 export function SessionControls({ onStart, onStop, canStart, canStop, starting }: SessionControlsProps) {
-  const [targetQty, setTargetQty] = useState(25);
+  const [targetQty, setTargetQty] = useState(100);
   const [horizonSteps, setHorizonSteps] = useState(300);
 
   const clampedQty = Math.min(QTY_MAX, Math.max(QTY_MIN, targetQty));

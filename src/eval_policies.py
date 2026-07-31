@@ -150,7 +150,7 @@ def main():
         env.close()
         rows.append((name, _stats(rewards)))
 
-    model_path = MODEL_DIR / "ppo_sor_final.zip"
+    model_path = MODEL_DIR / "best" / "best_model.zip"
     vecnorm_path = MODEL_DIR / "vecnormalize.pkl"
     if model_path.exists():
         model, venv = load_trained(model_path, vecnorm_path, dates, **engine_kwargs)

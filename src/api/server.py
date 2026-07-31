@@ -36,14 +36,18 @@ app.add_middleware(
 _active: Optional[PaperTradingSession] = None
 _history: Dict[str, PaperTradingSession] = {}
 
-# The current model was retrained with domain randomization across these
-# exact ranges (see src/train_rl.py) -- validated via a 30-window eval sweep
-# across both axes before deployment. Bounds are enforced here, not just in
-# the UI, so a value outside the validated distribution can't be requested
-# via any client (this is what fixed the earlier 100 BTC failure: the old
-# model was only ever trained/tested at one fixed point, 25 BTC / 300 ticks).
-QTY_MIN, QTY_MAX = 5.0, 100.0
-HORIZON_MIN, HORIZON_MAX = 150, 450
+# The current model was retrained with domain randomization across
+# qty=[25,250]/horizon=[150,450] (see src/train_rl.py), but a post-training
+# eval sweep found it fails catastrophically near the low end of the horizon
+# range (e.g. 16/60 episodes at 25 BTC/150 ticks left inventory unliquidated,
+# vs 0/60 by horizon=200) -- so HORIZON_MIN here is 200, narrower than what
+# was trained, to only expose what was actually confirmed safe. Bounds are
+# enforced here, not just in the UI, so a value outside the validated range
+# can't be requested via any client (this is also what fixed the earlier
+# 100 BTC failure: the old model was only ever trained/tested at one fixed
+# point, 25 BTC / 300 ticks).
+QTY_MIN, QTY_MAX = 25.0, 250.0
+HORIZON_MIN, HORIZON_MAX = 200, 450
 
 
 class StartSessionRequest(BaseModel):
@@ -183,12 +187,9 @@ async def stream_session(websocket: WebSocket, session_id: str):
 
 @app.get("/api/health")
 async def health():
+    # warmup_progress used to report an n_events/100 counter here, because the
+    # book was bootstrapped by replaying ~100 diff events (~100s). It's now
+    # seeded from a REST snapshot in ~3s, so there's no progress worth polling.
     if _active is None:
-        return {"status": "idle", "order_book_status": None, "warmup_progress": None}
-
-    ob = _active.order_book
-    warmup_progress = None
-    if ob.status in ("connecting", "warming_up"):
-        warmup_progress = {"n_events": ob.n_events, "warmup_events": ob.warmup_events}
-
-    return {"status": _active.status, "order_book_status": ob.status, "warmup_progress": warmup_progress}
+        return {"status": "idle", "order_book_status": None}
+    return {"status": _active.status, "order_book_status": _active.order_book.status}

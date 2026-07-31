@@ -16,7 +16,7 @@ processed_files.txt
 models/
 models_l1_backup/
 *.log
-*.txt
+
 # Distribution / packaging
 bin/
 build/

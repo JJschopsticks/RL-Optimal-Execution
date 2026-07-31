@@ -15,13 +15,24 @@ import json
 import sys
 from pathlib import Path
 
-from l2_book_state import apply_diff, top_of_book
+from l2_book_state import apply_diff, top_of_book, DEPTH_MAX_LEVELS
 
 RAW_DIR = Path(__file__).resolve().parent.parent / "data"
 OUT_DIR = Path(__file__).resolve().parent.parent / "cleaned_l2"
 
-DEPTH_LEVELS = 10
+# See l2_book_state for why this is no longer 10 levels: the old truncation
+# priced ~96% of a large fill with a fabricated fallback rather than real
+# depth. The filtering policy lives there so live and batch stay identical.
+DEPTH_LEVELS = DEPTH_MAX_LEVELS
 WARMUP_EVENTS = 100
+
+
+def _fmt(d) -> str:
+    """Trim trailing zeros ("64355.99000000" -> "64355.99"). Deep books make
+    these files ~20x larger, and Binance pads everything to 8 decimals;
+    Decimal() parses the trimmed form back identically."""
+    s = format(d, "f")
+    return s.rstrip("0").rstrip(".") if "." in s else s
 
 
 def reconstruct_day(date_str: str, depth_levels: int = DEPTH_LEVELS, warmup: int = WARMUP_EVENTS) -> int:
@@ -71,11 +82,11 @@ def reconstruct_day(date_str: str, depth_levels: int = DEPTH_LEVELS, warmup: int
 
                 record = {
                     "timestamp": ev["timestamp"],
-                    "bids": [[str(p), str(q)] for p, q in top_bids],
-                    "asks": [[str(p), str(q)] for p, q in top_asks],
-                    "best_bid": [str(top_bids[0][0]), str(top_bids[0][1])],
-                    "best_ask": [str(top_asks[0][0]), str(top_asks[0][1])],
-                    "midprice": str(midprice),
+                    "bids": [[_fmt(p), _fmt(q)] for p, q in top_bids],
+                    "asks": [[_fmt(p), _fmt(q)] for p, q in top_asks],
+                    "best_bid": [_fmt(top_bids[0][0]), _fmt(top_bids[0][1])],
+                    "best_ask": [_fmt(top_asks[0][0]), _fmt(top_asks[0][1])],
+                    "midprice": _fmt(midprice),
                 }
                 out_fh.write(json.dumps(record) + "\n")
                 n_written += 1

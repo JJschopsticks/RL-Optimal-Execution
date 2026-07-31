@@ -40,7 +40,7 @@ def main():
         help="Date never trained on, used to pick the 'best' checkpoint on true generalization.",
     )
     parser.add_argument(
-        "--target-qty-range", type=float, nargs=2, default=[5.0, 100.0], metavar=("MIN", "MAX"),
+        "--target-qty-range", type=float, nargs=2, default=[25.0, 250.0], metavar=("MIN", "MAX"),
         help="total_target_qty is resampled uniformly from this range each episode. "
              "Pass the same value twice (e.g. 25 25) to disable randomization.",
     )
